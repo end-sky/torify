@@ -1,9 +1,9 @@
 [package]
-name = "torify-prototype"
-version = "0.1.0"
+name = "torify-rs"
+version = "0.2.0"
 edition = "2021"
-license = "MIT"
-description = "Minimal Linux transparent Tor controller prototype"
+description = "Bridge and pluggable-transport configuration helper for Torify on Linux"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "torify-rs"
