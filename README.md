@@ -1,85 +1,54 @@
-# Torify Prototype
+# Torify
 
-A deliberately small Linux prototype inspired by Orbot's **Connect / Disconnect** flow. The Python implementation has a small Tkinter GUI. The C++ and Rust versions provide equivalent dependency-light command-line controllers.
+Torify is a lightweight Linux system-wide Tor routing prototype inspired by Orbot's Connect/Disconnect flow. The three-button interface stays intentionally small; the internals are split by responsibility:
 
-> **Important limitation:** Tor is a proxy, not a general-purpose VPN interface. Linux needs kernel firewall rules to redirect system traffic into Tor. This prototype uses the `nft` command from **nftables**, so a literally Tor-only installation is not sufficient. The Tor manual documents that `TransPort` requires operating-system transparent-proxy support; Tor handles TCP streams, not arbitrary UDP/ICMP traffic. See the [Tor manual](https://manpages.debian.org/unstable/tor/tor.1.en.html) and [ArchWiki's transparent torification notes](https://wiki.archlinux.org/title/tor).
+- **C++ / GTK 3:** desktop GUI (`Connect`, `Disconnect`, `Status`). It launches the Python backend asynchronously so the window does not freeze while Tor bootstraps.
+- **Python:** Tor process lifecycle, firewall kill-switch, status checking, and a retained CLI.
+- **Rust:** bridge-line parsing/validation, saved transport and bridge settings, and generation of Tor `UseBridges`, `Bridge`, and `ClientTransportPlugin` directives.
 
-## What this prototype does
+This is an original Linux implementation of relevant Orbot concepts, not a literal source-level translation of Android's `VpnService` or UI/service lifecycle. The Android VPN APIs do not exist on Linux. The bridge/transport behavior follows Tor's documented `torrc` configuration model.
 
-- Starts its own Tor client on local ports `19500` (SOCKS), `19540` (transparent TCP), and `19553` (DNS), avoiding Tor's usual default ports.
-- Installs one isolated nftables table, `inet torify_app`. It does **not** flush or replace the system's other firewall rules.
-- Redirects outbound TCP and DNS requests to Tor. Unsupported public UDP and other protocols are dropped while connected to avoid silently sending them outside Tor.
-- Keeps the firewall active if Tor fails to start or bootstrap. This is intentionally fail-closed: use **Disconnect** to restore normal routing.
-- Leaves loopback and common private/link-local/multicast destinations available for local network operation. Traffic to those destinations is **not** sent through Tor.
-- Starts Tor under a dedicated service account so unrelated processes belonging to your desktop user do not inherit the firewall exception. It searches for `tor`, `debian-tor`, `_tor`, `toranon`, or `torify-tor`; if no dedicated account is present, Connect refuses to run rather than using the shared `nobody` account.
+## Important networking limitation
 
-## Limitations and cautions
+Tor is a proxy, not a general-purpose VPN interface. This project uses Linux `nftables` to transparently redirect supported system traffic. A literal Tor-only installation is not sufficient: **nftables and administrator privileges are also required**. The app does not create a TUN device and does not route forwarded/container traffic.
 
-This is a prototype, not a hardened anonymity product. There are no bridges, no pluggable transports, and no per-app split-tunnelling controls. It does not provide a real TUN/VPN device and only handles locally generated host traffic, not forwarded/container traffic. Public UDP, ICMP, QUIC/HTTP/3 over UDP, and other non-TCP protocols are blocked while the table is active; apps that rely on them may fail. TCP DNS is redirected to Tor's DNSPort but resolver features outside Tor DNSPort's supported record types may not work. The private/LAN address exceptions are intentional bypasses.
+While connected, outbound TCP and DNS are routed to Tor. Unsupported public UDP and other protocols are blocked instead of silently falling back to the ordinary network. This means QUIC/HTTP/3, many games, VoIP, and some other applications may not work. Loopback and common private/link-local destinations intentionally remain reachable and bypass Tor. Do not rely on this prototype as a hardened anonymity product.
 
-A system administrator or root process can change the firewall, and transparent torification is not a replacement for a purpose-built isolation environment such as Whonix or Tails. Do not rely on this prototype for high-risk anonymity.
-
-## Dependencies
-
-- `tor`
-- `nftables` (`nft` command) — required to install/remove kernel firewall rules
-- Root permission through `sudo`, or launch the application as root. When run as root, the app uses `setpriv` from `util-linux` (or `sudo` as a fallback) to drop Tor to its service account.
-- Python 3 + Tkinter for the GUI, or a C++17 compiler / Rust toolchain for the CLI variants
-- Standard system utilities: coreutils, `grep`, `kill` from `procps`, and `setpriv` from `util-linux`
-
-No Python pip packages or Rust crates are required. **nftables is an unavoidable additional dependency in this prototype**; using only the Tor package would require replacing the nft command integration with a bundled kernel-netlink implementation (not included here).
-
-## Run the Python GUI
-
-Launch from a terminal so `sudo` can prompt when you press Connect:
+The firewall kill-switch remains active if Tor fails to start or bootstrap. Use Disconnect to remove it. If the application exits unexpectedly, the recovery command is:
 
 ```sh
-python3 python/torify.py
+sudo nft delete table inet torify_app
 ```
 
-Press **Connect** to authenticate, install the kill-switch, start Tor, and wait for Tor to bootstrap. Press **Disconnect** to stop the prototype Tor process and remove its table. The GUI intentionally keeps authentication prompts in the terminal that launched it.
+That removes only Torify's table; it does not flush unrelated firewall rules.
 
-The Python implementation also has a CLI:
+## Architecture
 
-```sh
-python3 python/torify.py status
-python3 python/torify.py connect
-python3 python/torify.py disconnect
+```text
+C++ GTK GUI  ──exec──>  Python backend  ──starts/configures──>  tor
+                              │
+                              ├── nftables kill-switch
+                              │
+                              └──exec──> Rust bridge/PT manager
+                                             ├── bridge validation
+                                             ├── persistent settings
+                                             └── Tor configuration fragment
 ```
 
-## C++ CLI
+Settings are saved in `~/.config/torify/` by default, with owner-only file permissions. Set `TORIFY_CONFIG_DIR` to use a different absolute settings directory. A configured transport helper must be executable by Tor's dedicated service account.
 
-```sh
-c++ -std=c++17 -O2 -Wall -Wextra -pedantic cpp/torify.cpp -o torify-cpp
-./torify-cpp status
-./torify-cpp connect
-./torify-cpp disconnect
-```
+## Build and run on NixOS / Nix
 
-## Rust CLI
-
-Rust standard library only; there are no Cargo dependencies:
-
-```sh
-cd rust
-cargo build --release
-./target/release/torify-rs status
-./target/release/torify-rs connect
-./target/release/torify-rs disconnect
-```
-
-## NixOS / Nix flake
-
-The flake's default package is the Python GUI. It also exposes `packages.cpp` and `packages.rust` for the other variants:
+The flake's default package is the C++ GUI, and it also installs the Python CLI. The Rust helper is included on the GUI/CLI wrapper's `PATH`. The flake includes `lyrebird` when the selected nixpkgs revision provides `pkgs.lyrebird`.
 
 ```sh
 nix build
 nix run
-nix build .#cpp
+nix build .#python
 nix build .#rust
 ```
 
-The application still needs a dedicated Tor service account at runtime. The flake supplies `tor`, `nftables`, and the small set of helper utilities used by the implementation; this avoids extra Python pip packages or Rust crates, but it cannot eliminate the kernel firewall requirement. If the `tor` package on your system does not create one, add a dedicated account to your NixOS configuration (the app recognizes `torify-tor`):
+`nix run` launches the GUI. Start it from a terminal so `sudo` can prompt when you press Connect, or authenticate in advance with `sudo -v`. The application expects a dedicated Tor service account called `tor`, `debian-tor`, `_tor`, `toranon`, or `torify-tor`; it refuses to share the `nobody` account because unrelated processes running as that account could bypass the firewall guard. On NixOS, installing a package does not necessarily create a standalone service account, so define one if your system does not already have a dedicated Tor account:
 
 ```nix
 {
@@ -90,37 +59,114 @@ The application still needs a dedicated Tor service account at runtime. The flak
     home = "/var/empty";
     createHome = false;
   };
-
-  environment.systemPackages = with pkgs; [
-    tor
-    nftables
-    python3
-    python3Packages.tkinter
-  ];
 }
 ```
 
-If using the GUI, run it from a terminal via `nix run .` so the privilege prompt has a terminal available. The app uses the account's UID in nftables to exempt only Tor's own outbound connections.
+Then apply your NixOS configuration before connecting. Torify also runs `tor --verify-config` as the Tor service account before installing the firewall table.
 
-## Recovery if the app exits unexpectedly
-
-The firewall table is designed to remain active if Tor dies; this prevents ordinary traffic from silently reverting to direct connections. To deliberately restore ordinary network routing even if the app is no longer running, remove **only this prototype's table**:
+For a local development shell:
 
 ```sh
-sudo nft delete table inet torify_app
+nix develop
+cargo build --manifest-path rust/Cargo.toml --release
+c++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+  $(pkg-config --cflags gtk+-3.0) cpp/torify_gui.cpp \
+  -o torify-gui $(pkg-config --libs gtk+-3.0)
 ```
 
-This command removes the prototype's routing guard and restores the system's existing routing/firewall behavior. It does not remove unrelated nftables tables. To inspect the active rules first:
+Launch `./torify-gui` from the project directory. If running outside the flake wrappers, put `rust/target/release` and the Tor helper tools on `PATH`.
+
+## Python backend and CLI
+
+The Python implementation uses only the standard library; it no longer needs Tkinter because the GUI is C++.
+
+From the source tree:
 
 ```sh
-sudo nft list table inet torify_app
+python3 python/torify.py status
+python3 python/torify.py connect
+python3 python/torify.py disconnect
 ```
+
+In the installed package, use `torify-cli` for the same commands. The CLI is kept separately from the GUI, so it remains useful for terminal-only sessions and troubleshooting.
+
+## Bridges and pluggable transports
+
+The Rust helper supports these transport modes:
+
+- `direct`: ordinary Tor connection without an automatically selected transport.
+- `obfs4`: requires a compatible obfs4 bridge line.
+- `snowflake`: uses the Snowflake example currently documented by the Tor Project when no custom bridge is saved; you can replace it with a current bridge line.
+- `webtunnel`: requires a compatible WebTunnel bridge line.
+- `meek_lite`: requires a compatible meek_lite bridge line.
+
+Tor's current guidance uses the external `lyrebird` managed-transport executable for obfs4, Snowflake, WebTunnel and meek. If only `obfs4proxy` is installed, only obfs4 is supported. Install the corresponding transport helper using your distribution package manager if the flake's `lyrebird` package is unavailable. The Rust helper detects a helper on `PATH` or accepts an override through `TORIFY_PT_BINARY`.
+
+Official bridge instructions and where to obtain bridge lines:
+
+- [Tor Project: using bridges and pluggable transports](https://support.torproject.org/little-t-tor/circumvention/using-bridges/)
+- [Tor Bridges](https://bridges.torproject.org/)
+
+### Choose a transport
+
+```sh
+python3 python/torify.py transport list
+python3 python/torify.py transport get
+python3 python/torify.py transport set direct
+python3 python/torify.py transport set snowflake
+python3 python/torify.py transport set obfs4
+```
+
+Use `snowflake` as a quick first test if direct Tor access is blocked. The documented Snowflake defaults are not guaranteed to stay valid forever; replace them if the Tor Project updates its configuration or your network blocks them.
+
+### Add a custom bridge
+
+Copy a full bridge line from the Tor Bridges site, then pass it as a single quoted argument. Examples below use placeholder text intentionally; **replace it with an actual bridge line**:
+
+```sh
+python3 python/torify.py bridge validate "obfs4 YOUR_BRIDGE_IP:PORT YOUR_FINGERPRINT cert=YOUR_CERT iat-mode=0"
+python3 python/torify.py bridge add "obfs4 YOUR_BRIDGE_IP:PORT YOUR_FINGERPRINT cert=YOUR_CERT iat-mode=0"
+python3 python/torify.py bridge list
+python3 python/torify.py bridge remove 1
+python3 python/torify.py bridge clear
+```
+
+For WebTunnel or Snowflake, use the exact transport prefix and parameters in the bridge line you received. A bridge line without a transport prefix is treated as a regular bridge. Unicode whitespace (including horizontal tabs) is normalized; line breaks, other control characters, malformed endpoints, invalid fingerprints and unsafe configuration tokens are rejected. Saved bridge files are restricted to the current user.
+
+A non-Snowflake pluggable-transport mode requires at least one compatible custom bridge. Torify validates and generates the configuration before installing the firewall table, so a missing transport helper or malformed bridge should be reported before the network kill-switch is changed. Once connected, use Status to check Tor bootstrap. To return to an ordinary direct Tor connection, clear custom bridges and set the mode to `direct`:
+
+```sh
+python3 python/torify.py bridge clear
+python3 python/torify.py transport set direct
+```
+
+The Rust manager's equivalent commands are available directly after building it:
+
+```sh
+torify-rs --help
+torify-rs transport list
+torify-rs bridge list
+torify-rs config
+```
+
+## Dependencies and implementation notes
+
+- Runtime: `tor`, `nftables` (`nft`), Python 3, `sudo` or root, and standard tools from coreutils, grep, procps and util-linux.
+- GUI build: C++17, GTK 3 development files and `pkg-config`.
+- Bridge/PT build: Rust toolchain. The Rust helper itself has **no Cargo dependencies**.
+- Pluggable transports: `lyrebird` is recommended; `obfs4proxy` only works for obfs4.
+
+Tor's configuration syntax and transport binaries are maintained upstream. Torify configures these components rather than reimplementing the cryptographic transports itself. Bridges can become unavailable or be blocked by networks. For safety, this version does not download arbitrary bridge lists automatically and does not bundle private bridge lines.
+
+## Testing status
+
+Unit tests have been added for Rust bridge validation, Unicode whitespace normalization, configuration-injection rejection, IPv6 endpoints, Snowflake directive generation, and direct mode. Python syntax and CLI wiring can be checked with `python3 -m py_compile python/torify.py`. The current build environment used to prepare this source did not include Rust/Cargo, GTK 3 development files, Tor or nftables, so the Rust tests, Nix builds and an end-to-end live Tor/firewall run could not be executed here. Treat the transport support as a test-ready prototype and verify on a spare Linux system before relying on it.
 
 ## Project layout
 
 ```text
-python/torify.py       Tkinter GUI + Python controller
-cpp/torify.cpp         C++17 CLI controller
-rust/src/main.rs       Rust CLI controller
+cpp/torify_gui.cpp     C++17 GTK 3 GUI
+python/torify.py       Python Tor/firewall backend and CLI
+rust/src/main.rs       Rust bridge/PT settings and torrc generator
 flake.nix              Nix package and development shell
 ```
