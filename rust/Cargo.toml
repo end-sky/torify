@@ -1,0 +1,10 @@
+[package]
+name = "torify-prototype"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minimal Linux transparent Tor controller prototype"
+
+[[bin]]
+name = "torify-rs"
+path = "src/main.rs"
