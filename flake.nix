@@ -1,5 +1,5 @@
 {
-  description = "Minimal Linux Torify prototype with Python GUI, C++ and Rust controllers";
+  description = "Torify: lightweight Linux Tor GUI with Python backend and Rust bridge/PT manager";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -10,90 +10,107 @@
       mkPackages = pkgs:
         let
           lib = pkgs.lib;
-          pythonGui = pkgs.python3.withPackages (ps: [ ps.tkinter ]);
-          runtimePath = lib.makeBinPath [
+          pythonRuntime = pkgs.python3;
+          ptPackages = lib.optionals (pkgs ? lyrebird) [ pkgs.lyrebird ];
+          runtimePackages = [
+            pythonRuntime
             pkgs.tor
             pkgs.nftables
             pkgs.coreutils
             pkgs.gnugrep
             pkgs.procps
             pkgs.util-linux
-          ];
+          ] ++ ptPackages;
+          runtimePath = lib.makeBinPath runtimePackages;
+          rustApp = pkgs.rustPlatform.buildRustPackage {
+            pname = "torify-rs";
+            version = "0.2.0";
+            src = ./rust;
+            cargoLock.lockFile = ./rust/Cargo.lock;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postInstall = ''
+              wrapProgram "$out/bin/torify-rs" --prefix PATH : "${runtimePath}"
+            '';
+            meta = {
+              description = "Torify bridge and pluggable-transport manager";
+              mainProgram = "torify-rs";
+              platforms = lib.platforms.linux;
+            };
+          };
+          fullRuntimePath = lib.makeBinPath (runtimePackages ++ [ rustApp ]);
           pythonApp = pkgs.stdenvNoCC.mkDerivation {
-            pname = "torify-prototype";
-            version = "0.1.0";
+            pname = "torify-cli";
+            version = "0.2.0";
             src = self;
             dontBuild = true;
             nativeBuildInputs = [ pkgs.makeWrapper ];
             installPhase = ''
               mkdir -p "$out/libexec" "$out/bin"
-              install -m 0755 "$src/python/torify.py" "$out/libexec/torify.py"
-              makeWrapper "${pythonGui}/bin/python3" "$out/bin/torify" \
+              install -m 0644 "$src/python/torify.py" "$out/libexec/torify.py"
+              makeWrapper "${pythonRuntime}/bin/python3" "$out/bin/torify-cli" \
                 --add-flags "$out/libexec/torify.py" \
-                --suffix PATH : "${runtimePath}"
+                --prefix PATH : "${fullRuntimePath}"
             '';
             meta = {
-              description = "Minimal Linux transparent Tor controller prototype";
+              description = "Python Tor backend and command-line bridge interface for Torify";
+              mainProgram = "torify-cli";
+              platforms = lib.platforms.linux;
+            };
+          };
+          guiApp = pkgs.stdenv.mkDerivation {
+            pname = "torify";
+            version = "0.2.0";
+            src = self;
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+            buildInputs = [ pkgs.gtk3 ];
+            buildPhase = ''
+              runHook preBuild
+              $CXX -std=c++17 -O2 -Wall -Wextra -pedantic \
+                $(pkg-config --cflags gtk+-3.0) \
+                "$src/cpp/torify_gui.cpp" -o torify-gui \
+                $(pkg-config --libs gtk+-3.0)
+              runHook postBuild
+            '';
+            installPhase = ''
+              mkdir -p "$out/bin" "$out/libexec"
+              install -m 0755 torify-gui "$out/bin/torify"
+              install -m 0644 "$src/python/torify.py" "$out/libexec/torify.py"
+              makeWrapper "${pythonRuntime}/bin/python3" "$out/bin/torify-cli" \
+                --add-flags "$out/libexec/torify.py" \
+                --prefix PATH : "${fullRuntimePath}"
+              wrapProgram "$out/bin/torify" --prefix PATH : "${fullRuntimePath}"
+            '';
+            meta = {
+              description = "Minimal GTK GUI for system-wide transparent Tor routing";
               mainProgram = "torify";
               platforms = lib.platforms.linux;
             };
           };
-          cppApp = pkgs.stdenv.mkDerivation {
-            pname = "torify-cpp";
-            version = "0.1.0";
-            src = self;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            buildPhase = ''
-              $CXX -std=c++17 -O2 -Wall -Wextra -pedantic "$src/cpp/torify.cpp" -o torify-cpp
-            '';
-            installPhase = ''
-              mkdir -p "$out/bin"
-              install -m 0755 torify-cpp "$out/bin/torify-cpp"
-              wrapProgram "$out/bin/torify-cpp" --suffix PATH : "${runtimePath}"
-            '';
-            meta = {
-              description = "Minimal Linux Torify controller in C++";
-              mainProgram = "torify-cpp";
-              platforms = lib.platforms.linux;
-            };
-          };
-          rustApp = pkgs.rustPlatform.buildRustPackage {
-            pname = "torify-rs";
-            version = "0.1.0";
-            src = ./rust;
-            cargoLock.lockFile = ./rust/Cargo.lock;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            postInstall = ''
-              wrapProgram "$out/bin/torify-rs" --suffix PATH : "${runtimePath}"
-            '';
-            meta = {
-              description = "Minimal Linux Torify controller in Rust";
-              mainProgram = "torify-rs";
-              platforms = lib.platforms.linux;
-            };
-          };
         in {
-          default = pythonApp;
+          default = guiApp;
+          gui = guiApp;
+          cpp = guiApp;
           python = pythonApp;
-          cpp = cppApp;
           rust = rustApp;
         };
     in {
       packages = forAllSystems mkPackages;
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = [
-            (pkgs.python3.withPackages (ps: [ ps.tkinter ]))
-            pkgs.tor
-            pkgs.nftables
-            pkgs.coreutils
-            pkgs.gnugrep
-            pkgs.procps
-            pkgs.util-linux
-            pkgs.gcc
-            pkgs.cargo
-            pkgs.rustc
-          ];
+          packages = with pkgs; [
+            python3
+            gtk3
+            pkg-config
+            tor
+            nftables
+            coreutils
+            gnugrep
+            procps
+            util-linux
+            gcc
+            cargo
+            rustc
+          ] ++ pkgs.lib.optionals (pkgs ? lyrebird) [ pkgs.lyrebird ];
         };
       });
     };
