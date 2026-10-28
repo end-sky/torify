@@ -20,6 +20,8 @@
             pkgs.gnugrep
             pkgs.procps
             pkgs.util-linux
+            pkgs.iproute2
+            pkgs.bash
           ] ++ ptPackages;
           runtimePath = lib.makeBinPath runtimePackages;
           rustApp = pkgs.rustPlatform.buildRustPackage {
@@ -62,12 +64,16 @@
             version = "0.2.0";
             src = self;
             nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
-            buildInputs = [ pkgs.gtk3 ];
+            buildInputs = [ pkgs.gtk3 pkgs.glib pkgs.cairo pkgs.pango pkgs.gdk-pixbuf ];
             buildPhase = ''
               runHook preBuild
               $CXX -std=c++17 -O2 -Wall -Wextra -pedantic \
                 $(pkg-config --cflags gtk+-3.0) \
-                "$src/cpp/torify_gui.cpp" -o torify-gui \
+                "$src/cpp/torify_gui_modern.cpp" \
+                "$src/cpp/tabs.cpp" \
+                "$src/cpp/settings.cpp" \
+                "$src/cpp/prefs.cpp" \
+                -o torify-gui \
                 $(pkg-config --libs gtk+-3.0)
               runHook postBuild
             '';
@@ -78,12 +84,16 @@
               makeWrapper "${pythonRuntime}/bin/python3" "$out/bin/torify-cli" \
                 --add-flags "$out/libexec/torify.py" \
                 --prefix PATH : "${fullRuntimePath}"
-              wrapProgram "$out/bin/torify" --prefix PATH : "${fullRuntimePath}"
+              wrapProgram "$out/bin/torify" \
+                --prefix PATH : "${fullRuntimePath}" \
+                --set GDK_BACKEND x11,xwayland,wayland \
+                --set GTK_THEME Adwaita:dark
             '';
             meta = {
-              description = "Minimal GTK GUI for system-wide transparent Tor routing";
+              description = "Modern GTK GUI for system-wide transparent Tor routing with tabs";
               mainProgram = "torify";
               platforms = lib.platforms.linux;
+              license = lib.licenses.gpl3Plus;
             };
           };
         in {
@@ -107,10 +117,18 @@
             gnugrep
             procps
             util-linux
+            iproute2
             gcc
             cargo
             rustc
+            xwayland
+            wayland
+            wayland-protocols
           ] ++ pkgs.lib.optionals (pkgs ? lyrebird) [ pkgs.lyrebird ];
+          shellHook = ''
+            export GDK_BACKEND=x11,xwayland,wayland
+            echo "Torify development environment ready"
+          '';
         };
       });
     };
